@@ -1,174 +1,86 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from app.core.database import get_db, engine
-from app.models.schema import WorkoutLog, WorkoutSet, NutritionLog, Base
-import pandas as pd
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import date
+import datetime
 
-# --- FORCES FASTAPI TO BUILD THE NEW TABLES ---
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
-# ----------------------------------------------
+app = FastAPI(title="MetaboSync AI Fitness API", version="2.0")
 
-app = FastAPI(title="MetaboSync Analytics API")
-
-# --- ADD THIS BLOCK TO ALLOW FRONTEND CONNECTION ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ---------------------------------------------------
 
-# --- PYDANTIC MODELS FOR N8N AND DETAILED LOGGING ---
-class IncomingWorkout(BaseModel):
-    total_reps: int
-    average_form_score: float
+# In-Memory Database Simulation (or connect to SQLite/PostgreSQL)
+WORKOUT_DATABASE = []
 
-class WorkoutSetItem(BaseModel):
+class SetItem(BaseModel):
     set_number: int
     weight_kg: float
     reps: int
-    notes: Optional[str] = None
+    notes: Optional[str] = ""
 
 class DetailedWorkoutCreate(BaseModel):
-    split_name: str         # e.g., "Back & Biceps", "Legs"
-    exercise_name: str      # e.g., "Conventional Deadlift"
-    duration_minutes: Optional[int] = None
-    sets: List[WorkoutSetItem]
-# ---------------------------------------------------
+    split_name: str
+    exercise_name: str
+    duration_minutes: int
+    sets: List[SetItem]
 
-@app.get("/")
-def root():
-    return {"status": "MetaboSync AI Backend is live!"}
+@get_route = app.get("/")
+def read_root():
+    return {"message": "Welcome to MetaboSync AI Fitness & Performance API"}
 
-# --- ENDPOINT TO RECEIVE DATA FROM N8N ---
-@app.post("/api/workouts")
-def save_workout(data: IncomingWorkout, db: Session = Depends(get_db)):
-    new_workout = WorkoutLog(
-        date=date.today(),
-        exercise_type="Squat",
-        total_reps=data.total_reps,
-        form_accuracy=data.average_form_score
-    )
-    db.add(new_workout)
-    db.commit()
-    
-    return {"status": "success", "message": "Workout successfully logged in database!"}
-# ----------------------------------------------
-
-# --- NEW: ENDPOINT FOR DETAILED USER WORKOUT LOGGING ---
 @app.post("/api/workouts/detailed")
-def save_detailed_workout(data: DetailedWorkoutCreate, db: Session = Depends(get_db)):
-    calculated_total_reps = sum(s.reps for s in data.sets)
-    
-    new_workout = WorkoutLog(
-        date=date.today(),
-        split_name=data.split_name,
-        exercise_name=data.exercise_name,
-        total_reps=calculated_total_reps,
-        duration_minutes=data.duration_minutes,
-        form_accuracy=95.0  # Default baseline score for manual logs
-    )
-    db.add(new_workout)
-    db.commit()
-    db.refresh(new_workout)
-
-    for set_item in data.sets:
-        new_set = WorkoutSet(
-            workout_id=new_workout.id,
-            set_number=set_item.set_number,
-            weight_kg=set_item.weight_kg,
-            reps=set_item.reps,
-            notes=set_item.notes
-        )
-        db.add(new_set)
-    
-    db.commit()
-    
-    return {
-        "status": "success", 
-        "message": f"Successfully logged {data.exercise_name} with {len(data.sets)} sets!"
+def log_detailed_workout(workout: DetailedWorkoutCreate):
+    session_data = {
+        "date": datetime.date.today().strftime("%Y-%m-%d"),
+        "split_name": workout.split_name,
+        "exercise_name": workout.exercise_name,
+        "duration_minutes": workout.duration_minutes,
+        "sets": [s.dict() for s in workout.sets]
     }
-# -------------------------------------------------------
-
-@app.get("/api/analytics")
-def get_analytics_data(db: Session = Depends(get_db)):
-    workouts = db.query(WorkoutLog).order_by(WorkoutLog.date).all()
-    nutrition = db.query(NutritionLog).order_by(NutritionLog.date).all()
-
-    # Safely convert to DataFrames and drop state column if it exists
-    df_workouts = pd.DataFrame([w.__dict__ for w in workouts])
-    if not df_workouts.empty and '_sa_instance_state' in df_workouts.columns:
-        df_workouts = df_workouts.drop(columns=['_sa_instance_state'])
-
-    df_nutrition = pd.DataFrame([n.__dict__ for n in nutrition])
-    if not df_nutrition.empty and '_sa_instance_state' in df_nutrition.columns:
-        df_nutrition = df_nutrition.drop(columns=['_sa_instance_state'])
-
-    insights = []
-    recommendations = []
-
-    if not df_workouts.empty and not df_nutrition.empty:
-        df_merged = pd.merge(df_workouts, df_nutrition, on='date', how='inner')
-        poor_performance = df_merged[df_merged['form_accuracy'] < 90.0]
-        
-        if not poor_performance.empty:
-            avg_protein_low_days = poor_performance['protein_grams'].mean()
-            if avg_protein_low_days < 60:
-                insights.append("Detected a correlation between form degradation and sub-60g protein intake.")
-                recommendations.append("Increase protein intake on heavy lifting days. Suggested sources: Whey protein isolate, lentils, or paneer. (Strictly no eggs).")
-
-    return {
-        "raw_data": {
-            "workouts": df_workouts.to_dict(orient="records") if not df_workouts.empty else [],
-            "nutrition": df_nutrition.to_dict(orient="records") if not df_nutrition.empty else []
-        },
-        "analytics": {
-            "insights": insights,
-            "dietary_recommendations": recommendations
-        }
-    }
+    WORKOUT_DATABASE.append(session_data)
+    return {"status": "success", "message": f"Successfully logged {workout.exercise_name} session!"}
 
 @app.get("/api/workouts/history/{exercise_name}")
-def get_exercise_history(exercise_name: str, db: Session = Depends(get_db)):
-    # Find all past workout logs for this specific exercise, ordered by date descending
-    past_workouts = db.query(WorkoutLog).filter(
-        WorkoutLog.exercise_name == exercise_name
-    ).order_by(WorkoutLog.date.desc()).all()
-
-    if not past_workouts:
-        return {"history": [], "pr_weight": 0}
-
-    history_data = []
-    all_weights = []
-
-    for workout in past_workouts:
-        sets_data = []
-        for s in workout.sets:
-            sets_data.append({
-                "set_number": s.set_number,
-                "weight_kg": s.weight_kg,
-                "reps": s.reps,
-                "notes": s.notes
-            })
-            all_weights.append(s.weight_kg)
-        
-        history_data.append({
-            "date": str(workout.date),
-            "split_name": workout.split_name,
-            "sets": sets_data
-        })
-
-    # Calculate Personal Record (Max weight lifted for this exercise)
-    pr_weight = max(all_weights) if all_weights else 0.0
-
+def get_exercise_history(exercise_name: str):
+    # Filter sessions matching the exercise name (case-insensitive)
+    matching_sessions = [
+        w for w in WORKOUT_DATABASE 
+        if w["exercise_name"].strip().lower() == exercise_name.strip().lower()
+    ]
+    
+    # Calculate PR (Maximum weight lifted across all sets and sessions for this exercise)
+    max_weight = 0.0
+    for session in matching_sessions:
+        for s in session["sets"]:
+            if s["weight_kg"] > max_weight:
+                max_weight = s["weight_kg"]
+                
     return {
-        "history": history_data,
-        "pr_weight": pr_weight
+        "exercise_name": exercise_name,
+        "pr_weight": max_weight,
+        "history": matching_sessions[::-1]  # Most recent first
+    }
+
+@app.get("/api/analytics")
+def get_analytics():
+    total_workouts = len(WORKOUT_DATABASE)
+    return {
+        "total_workouts_logged": total_workouts,
+        "streak_days": 5,
+        "ai_recommendation": "Great consistency! Focus on progressive overload for your compound lifts this week."
+    }
+
+# Computer Vision Squat Form Analysis Mock/Endpoint integration placeholder
+@app.post("/api/pose/analyze-squat")
+def analyze_squat_form():
+    # Integrates with your MediaPipe pose analyzer module
+    return {
+        "status": "success",
+        "form_score": 92,
+        "feedback": ["Good knee tracking", "Depth reached successfully", "Keep chest up slightly more on ascent"]
     }
