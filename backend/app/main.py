@@ -29,7 +29,7 @@ class DetailedWorkoutCreate(BaseModel):
     duration_minutes: int
     sets: List[SetItem]
 
-@get_route = app.get("/")
+@app.get("/")
 def read_root():
     return {"message": "Welcome to MetaboSync AI Fitness & Performance API"}
 
