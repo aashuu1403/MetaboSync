@@ -5,7 +5,7 @@ from typing import List, Optional
 import datetime
 import random
 
-app = FastAPI(title="MetaboSync AI Fitness API", version="2.5")
+app = FastAPI(title="MetaboSync AI Fitness API", version="2.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,9 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-Memory Database Simulations
-USER_DATABASE = {}       # {email: {name, phone, password, otp_code, is_verified}}
-WORKOUT_DATABASE = []    # Stores workouts per user email
+USER_DATABASE = {}
+WORKOUT_DATABASE = []
 
 class SignupRequest(BaseModel):
     full_name: str
@@ -34,7 +33,7 @@ class LoginRequest(BaseModel):
     password: str
 
 class SetItem(BaseModel):
-    set_number: number = 1 # type: ignore
+    set_number: int
     weight_kg: float
     reps: int
     notes: Optional[str] = ""
@@ -50,14 +49,12 @@ class DetailedWorkoutCreate(BaseModel):
 def read_root():
     return {"message": "Welcome to MetaboSync Secure AI Fitness & Performance API"}
 
-# --- AUTHENTICATION ENDPOINTS ---
-
 @app.post("/api/auth/signup")
 def register_user(data: SignupRequest):
     if data.email in USER_DATABASE:
         raise HTTPException(status_code=400, detail="User with this email already exists.")
     
-    # Generate a 4-digit mock OTP (In production, integrate Twilio/SendGrid)
+    # Generate 4-digit OTP
     mock_otp = str(random.randint(1000, 9999))
     
     USER_DATABASE[data.email] = {
@@ -70,8 +67,8 @@ def register_user(data: SignupRequest):
     
     return {
         "status": "success", 
-        "message": f"OTP sent successfully to {data.email} and phone {data.phone}.",
-        "debug_otp": mock_otp  # Shown for ease of testing in development
+        "message": f"Verification code generated for {data.email}.",
+        "otp_code": mock_otp  # Sent explicitly to frontend for seamless testing
     }
 
 @app.post("/api/auth/verify-otp")
@@ -106,8 +103,6 @@ def login_user(data: LoginRequest):
             "phone": user["phone"]
         }
     }
-
-# --- WORKOUT & FITNESS ENDPOINTS ---
 
 @app.post("/api/workouts/detailed")
 def log_detailed_workout(workout: DetailedWorkoutCreate):
