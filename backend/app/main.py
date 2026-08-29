@@ -4,8 +4,10 @@ from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 import datetime
 import random
+import smtplib
+from email.message import EmailMessage
 
-app = FastAPI(title="MetaboSync AI Fitness API", version="2.6")
+app = FastAPI(title="MetaboSync AI Fitness API", version="2.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,6 +19,14 @@ app.add_middleware(
 
 USER_DATABASE = {}
 WORKOUT_DATABASE = []
+
+# --- CONFIG YOUR SMTP SENDER HERE ---
+# To use real Gmail delivery, generate an App Password from your Google Account settings 
+# and input your email & app password below:
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "your_email@gmail.com"          # Replace with your Gmail
+SENDER_PASSWORD = "your_google_app_password"   # Replace with your 16-character Google App Password
 
 class SignupRequest(BaseModel):
     full_name: str
@@ -45,6 +55,23 @@ class DetailedWorkoutCreate(BaseModel):
     duration_minutes: int
     sets: List[SetItem]
 
+def send_real_email_otp(recipient_email: str, otp_code: str):
+    msg = EmailMessage()
+    msg.set_content(f"Hello,\n\nYour MetaboSync verification code is: {otp_code}\n\nEnter this code to complete your account setup.\n\nBest regards,\nMetaboSync Team")
+    msg["Subject"] = "Your MetaboSync Verification Code"
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = recipient_email
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"SMTP Email Error: {e}")
+        return False
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to MetaboSync Secure AI Fitness & Performance API"}
@@ -54,21 +81,31 @@ def register_user(data: SignupRequest):
     if data.email in USER_DATABASE:
         raise HTTPException(status_code=400, detail="User with this email already exists.")
     
-    # Generate 4-digit OTP
-    mock_otp = str(random.randint(1000, 9999))
+    # Generate 6-digit OTP code standard in production apps
+    real_otp = str(random.randint(100000, 999999))
     
     USER_DATABASE[data.email] = {
         "full_name": data.full_name,
         "phone": data.phone,
         "password": None,
-        "otp_code": mock_otp,
+        "otp_code": real_otp,
         "is_verified": False
     }
     
+    # Attempt to send real email
+    email_sent = send_real_email_otp(data.email, real_otp)
+    
+    if not email_sent:
+        # Fallback for dev mode if SMTP isn't configured yet
+        return {
+            "status": "success",
+            "message": f"User registered, but SMTP failed. Dev OTP fallback: {real_otp}",
+            "dev_otp": real_otp
+        }
+    
     return {
         "status": "success", 
-        "message": f"Verification code generated for {data.email}.",
-        "otp_code": mock_otp  # Sent explicitly to frontend for seamless testing
+        "message": f"Real verification code successfully sent to {data.email}!"
     }
 
 @app.post("/api/auth/verify-otp")
