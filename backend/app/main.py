@@ -7,12 +7,28 @@ import datetime
 import random
 import smtplib
 from email.message import EmailMessage
+import os
+from dotenv import load_dotenv
 
 from .core.database import engine, get_db, Base
-from .schemas.user import SignupRequest, VerifyOTPRequest, LoginRequest
+from .schemas.user import SignupRequest, VerifyOTPRequest, LoginRequest, CoachRequest
 from .schemas.workout import DetailedWorkoutCreate
 from .core.security import hash_password, verify_password
 from .models import user, workout
+
+import google.generativeai as genai
+
+# Load environment variables from the .env file
+load_dotenv()
+
+# --- AI COACH CONFIGURATION ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    coach_model = genai.GenerativeModel('gemini-3.6-flash')
+else:
+    coach_model = None
+    print("WARNING: GEMINI_API_KEY not found in .env file.")
 
 # Creates tables on startup if they don't already exist (SQLite file:
 # metabosync.db, created next to this file). Safe to call every run.
@@ -253,4 +269,65 @@ def analyze_squat_form():
         "status": "success",
         "form_score": 92,
         "feedback": ["Good knee tracking", "Depth reached successfully", "Keep chest up slightly more on ascent"],
+    }
+
+
+@app.post("/api/coach/advice")
+def get_ai_coach_advice(data: CoachRequest, db: Session = Depends(get_db)):
+    # 1. Verify user exists
+    db_user = db.query(user.User).filter(user.User.email == data.email).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+
+    # 2. Retrieve all user workouts and sets (Retrieval step)
+    user_workouts = db.query(workout.Workout).filter(workout.Workout.user_id == db_user.id).all()
+    
+    workout_summary = []
+    max_weights = {}
+    for w in user_workouts:
+        exercise = w.exercise_name
+        for s in w.sets:
+            if exercise not in max_weights or s.weight_kg > max_weights[exercise]:
+                max_weights[exercise] = s.weight_kg
+        workout_summary.append(f"- Date: {w.date}, Split: {w.split_name}, Exercise: {w.exercise_name}")
+
+    context_text = "\n".join(workout_summary) if workout_summary else "No workouts logged yet."
+    pr_text = ", ".join([f"{ex}: {wt}kg" for ex, wt in max_weights.items()]) or "None"
+
+    # 3. Construct the RAG prompt payload
+    system_prompt = (
+        "You are MetaboSync AI, an expert fitness and strength coach. "
+        "Analyze the user's actual workout logs and personal records provided below "
+        "to give tailored, actionable advice on progressive overload, recovery, and volume adjustments.\n\n"
+        f"User Name: {db_user.full_name}\n"
+        f"Personal Records (PRs): {pr_text}\n"
+        f"Workout History Log:\n{context_text}"
+    )
+
+    # 4. Generate the AI Response
+    if not coach_model:
+        return {
+            "status": "error",
+            "message": "AI Coach is currently sleeping. Please add a valid GEMINI_API_KEY in main.py!"
+        }
+
+    try:
+        # Combine the system context with the user's specific question
+        full_prompt = f"{system_prompt}\n\nUser Question: {data.query}\n\nCoach Response:"
+        
+        response = coach_model.generate_content(full_prompt)
+        ai_advice = response.text
+        
+    except Exception as e:
+        print(f"LLM Generation Error: {e}")
+        raise HTTPException(status_code=500, detail="The AI Coach encountered an error generating your advice.")
+
+    return {
+        "status": "success",
+        "user_query": data.query,
+        "advice": ai_advice,
+        "context_used": {
+            "total_sessions_analyzed": len(user_workouts),
+            "prs_found": max_weights
+        }
     }

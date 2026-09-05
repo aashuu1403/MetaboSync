@@ -12,3 +12,7 @@ const config = {
 };
 
 export default config;
+
+plugins: [
+  require('@tailwindcss/typography'),
+],

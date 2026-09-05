@@ -27,3 +27,7 @@ class DetailedWorkoutCreate(BaseModel):
     exercise_name: str
     duration_minutes: int
     sets: List[WorkoutSetCreate]
+
+class CoachRequest(BaseModel):
+    email: str
+    query: str
