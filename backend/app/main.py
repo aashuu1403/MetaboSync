@@ -1,13 +1,24 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import List
 import datetime
 import random
 import smtplib
 from email.message import EmailMessage
 
-app = FastAPI(title="MetaboSync AI Fitness API", version="2.7")
+from .core.database import engine, get_db, Base
+from .schemas.user import SignupRequest, VerifyOTPRequest, LoginRequest
+from .schemas.workout import DetailedWorkoutCreate
+from .core.security import hash_password, verify_password
+from .models import user, workout
+
+# Creates tables on startup if they don't already exist (SQLite file:
+# metabosync.db, created next to this file). Safe to call every run.
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="MetaboSync AI Fitness API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,47 +28,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-USER_DATABASE = {}
-WORKOUT_DATABASE = []
-
-# --- CONFIG YOUR SMTP SENDER HERE ---
-# To use real Gmail delivery, generate an App Password from your Google Account settings 
-# and input your email & app password below:
+# --- GMAIL SMTP CONFIGURATION ---
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL = "your_email@gmail.com"          # Replace with your Gmail
-SENDER_PASSWORD = "your_google_app_password"   # Replace with your 16-character Google App Password
+SENDER_EMAIL = "aashna.lalka14@gmail.com"          # Your Gmail address
+SENDER_PASSWORD = "YOUR_16_CHARACTER_APP_PASSWORD"  # Your Google App Password
 
-class SignupRequest(BaseModel):
-    full_name: str
-    email: EmailStr
-    phone: str
 
-class VerifyOTPRequest(BaseModel):
-    email: EmailStr
-    otp: str
-    password: str
+def send_real_email_otp(recipient_email: str, otp_code: str) -> bool:
+    """Dispatches a real verification OTP email via Gmail SMTP"""
+    if SENDER_PASSWORD == "YOUR_16_CHARACTER_APP_PASSWORD" or not SENDER_PASSWORD:
+        print(f"\n[DEV FALLBACK] Gmail App Password not set. Code for {recipient_email}: {otp_code}\n")
+        return False
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-class SetItem(BaseModel):
-    set_number: int
-    weight_kg: float
-    reps: int
-    notes: Optional[str] = ""
-
-class DetailedWorkoutCreate(BaseModel):
-    email: EmailStr
-    split_name: str
-    exercise_name: str
-    duration_minutes: int
-    sets: List[SetItem]
-
-def send_real_email_otp(recipient_email: str, otp_code: str):
     msg = EmailMessage()
-    msg.set_content(f"Hello,\n\nYour MetaboSync verification code is: {otp_code}\n\nEnter this code to complete your account setup.\n\nBest regards,\nMetaboSync Team")
+    msg.set_content(
+        f"Hello from MetaboSync,\n\nYour account verification code is: {otp_code}\n\n"
+        f"Enter this code on the verification screen to complete your profile setup "
+        f"and link your phone number.\n\nBest regards,\nMetaboSync Security Team"
+    )
     msg["Subject"] = "Your MetaboSync Verification Code"
     msg["From"] = SENDER_EMAIL
     msg["To"] = recipient_email
@@ -72,120 +61,196 @@ def send_real_email_otp(recipient_email: str, otp_code: str):
         print(f"SMTP Email Error: {e}")
         return False
 
+
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to MetaboSync Secure AI Fitness & Performance API"}
+    return {"message": "Welcome to MetaboSync Secure Gmail Auth & Fitness API"}
+
 
 @app.post("/api/auth/signup")
-def register_user(data: SignupRequest):
-    if data.email in USER_DATABASE:
-        raise HTTPException(status_code=400, detail="User with this email already exists.")
-    
-    # Generate 6-digit OTP code standard in production apps
+def register_user(data: SignupRequest, db: Session = Depends(get_db)):
+    existing = (
+        db.query(user.User)
+        .filter((user.User.email == data.email) | (user.User.phone == data.phone))
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="An account with this email or phone number already exists.",
+        )
+
     real_otp = str(random.randint(100000, 999999))
-    
-    USER_DATABASE[data.email] = {
-        "full_name": data.full_name,
-        "phone": data.phone,
-        "password": None,
-        "otp_code": real_otp,
-        "is_verified": False
-    }
-    
-    # Attempt to send real email
+
+    new_user = user.User(
+        full_name=data.full_name,
+        email=data.email,
+        phone=data.phone,
+        hashed_password="",
+        otp_code=real_otp,
+        is_verified=False,
+    )
+    db.add(new_user)
+    db.commit()
+
     email_sent = send_real_email_otp(data.email, real_otp)
-    
-    if not email_sent:
-        # Fallback for dev mode if SMTP isn't configured yet
-        return {
-            "status": "success",
-            "message": f"User registered, but SMTP failed. Dev OTP fallback: {real_otp}",
-            "dev_otp": real_otp
-        }
-    
+
     return {
-        "status": "success", 
-        "message": f"Real verification code successfully sent to {data.email}!"
+        "status": "success",
+        "message": (
+            f"Verification code successfully sent to {data.email}!"
+            if email_sent
+            else "Registered, but SMTP needs an App Password. Check backend terminal for code."
+        ),
+        "dev_fallback_otp": real_otp if not email_sent else None,
     }
+
 
 @app.post("/api/auth/verify-otp")
-def verify_otp_and_set_password(data: VerifyOTPRequest):
-    user = USER_DATABASE.get(data.email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-    
-    if user["otp_code"] != data.otp:
-        raise HTTPException(status_code=400, detail="Invalid OTP code entered.")
-    
-    user["password"] = data.password
-    user["is_verified"] = True
-    
-    return {"status": "success", "message": "Account verified and password created successfully!"}
+def verify_otp_and_set_password(data: VerifyOTPRequest, db: Session = Depends(get_db)):
+    db_user = db.query(user.User).filter(user.User.email == data.email).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+
+    if db_user.otp_code != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP verification code entered.")
+
+    db_user.hashed_password = hash_password(data.password)
+    db_user.is_verified = True
+    db.commit()
+
+    return {"status": "success", "message": "Account verified, password secured, and profile successfully linked!"}
+
 
 @app.post("/api/auth/login")
-def login_user(data: LoginRequest):
-    user = USER_DATABASE.get(data.email)
-    if not user or not user["is_verified"]:
-        raise HTTPException(status_code=400, detail="Account not found or not verified.")
-    
-    if user["password"] != data.password:
+def login_user(data: LoginRequest, db: Session = Depends(get_db)):
+    identifier = data.identifier.strip()
+
+    if "@" in identifier:
+        db_user = db.query(user.User).filter(user.User.email == identifier).first()
+    else:
+        db_user = db.query(user.User).filter(user.User.phone == identifier).first()
+
+    if not db_user or not db_user.is_verified:
+        raise HTTPException(
+            status_code=400,
+            detail="No verified account found matching this email or phone number.",
+        )
+
+    if not db_user.hashed_password or not verify_password(data.password, db_user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect password.")
-        
+
     return {
         "status": "success",
         "message": "Login successful!",
         "user": {
-            "full_name": user["full_name"],
-            "email": data.email,
-            "phone": user["phone"]
-        }
+            "full_name": db_user.full_name,
+            "email": db_user.email,
+            "phone": db_user.phone,
+        },
     }
+
 
 @app.post("/api/workouts/detailed")
-def log_detailed_workout(workout: DetailedWorkoutCreate):
-    session_data = {
-        "email": workout.email,
-        "date": datetime.date.today().strftime("%Y-%m-%d"),
-        "split_name": workout.split_name,
-        "exercise_name": workout.exercise_name,
-        "duration_minutes": workout.duration_minutes,
-        "sets": [s.dict() for s in workout.sets]
-    }
-    WORKOUT_DATABASE.append(session_data)
-    return {"status": "success", "message": f"Successfully logged {workout.exercise_name} session!"}
+def log_detailed_workout(workout_data: DetailedWorkoutCreate, db: Session = Depends(get_db)):
+    db_user = db.query(user.User).filter(user.User.email == workout_data.email).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User profile not found.")
+
+    db_workout = workout.Workout(
+        user_id=db_user.id,
+        split_name=workout_data.split_name,
+        exercise_name=workout_data.exercise_name,
+        duration_minutes=workout_data.duration_minutes,
+        date=datetime.date.today(),
+    )
+    db.add(db_workout)
+    db.flush()  # get db_workout.id before inserting sets
+
+    for s in workout_data.sets:
+        db.add(
+            workout.WorkoutSet(
+                workout_id=db_workout.id,
+                set_number=s.set_number,
+                weight_kg=s.weight_kg,
+                reps=s.reps,
+                notes=s.notes or "",
+            )
+        )
+
+    db.commit()
+    return {"status": "success", "message": f"Successfully logged {workout_data.exercise_name} session!"}
+
 
 @app.get("/api/workouts/history/{email}/{exercise_name}")
-def get_exercise_history(email: str, exercise_name: str):
-    matching_sessions = [
-        w for w in WORKOUT_DATABASE 
-        if w["email"].lower() == email.lower() and w["exercise_name"].strip().lower() == exercise_name.strip().lower()
-    ]
-    
+def get_exercise_history(email: str, exercise_name: str, db: Session = Depends(get_db)):
+    db_user = db.query(user.User).filter(func.lower(user.User.email) == email.lower()).first()
+    if not db_user:
+        return {"exercise_name": exercise_name, "pr_weight": 0.0, "history": []}
+
+    matching_workouts = (
+        db.query(workout.Workout)
+        .filter(
+            workout.Workout.user_id == db_user.id,
+            func.lower(workout.Workout.exercise_name) == exercise_name.strip().lower(),
+        )
+        .order_by(workout.Workout.date.desc(), workout.Workout.id.desc())
+        .all()
+    )
+
     max_weight = 0.0
-    for session in matching_sessions:
-        for s in session["sets"]:
+    history = []
+    for w in matching_workouts:
+        sets = [
+            {
+                "set_number": s.set_number,
+                "weight_kg": s.weight_kg,
+                "reps": s.reps,
+                "notes": s.notes,
+            }
+            for s in w.sets
+        ]
+        for s in sets:
             if s["weight_kg"] > max_weight:
                 max_weight = s["weight_kg"]
-                
+
+        history.append(
+            {
+                "email": db_user.email,
+                "date": w.date.strftime("%Y-%m-%d"),
+                "split_name": w.split_name,
+                "exercise_name": w.exercise_name,
+                "duration_minutes": w.duration_minutes,
+                "sets": sets,
+            }
+        )
+
     return {
         "exercise_name": exercise_name,
         "pr_weight": max_weight,
-        "history": matching_sessions[::-1]
+        "history": history,
     }
 
+
 @app.get("/api/analytics/{email}")
-def get_analytics(email: str):
-    user_workouts = [w for w in WORKOUT_DATABASE if w["email"].lower() == email.lower()]
+def get_analytics(email: str, db: Session = Depends(get_db)):
+    db_user = db.query(user.User).filter(func.lower(user.User.email) == email.lower()).first()
+    if not db_user:
+        return {"total_workouts_logged": 0, "streak_days": 0, "ai_recommendation": "Log your first workout to get started!"}
+
+    total = db.query(workout.Workout).filter(workout.Workout.user_id == db_user.id).count()
+
     return {
-        "total_workouts_logged": len(user_workouts),
+        "total_workouts_logged": total,
         "streak_days": 5,
-        "ai_recommendation": "Great consistency! Focus on progressive overload for your compound lifts this week."
+        "ai_recommendation": "Great consistency! Focus on progressive overload for your compound lifts this week.",
     }
+
 
 @app.post("/api/pose/analyze-squat")
 def analyze_squat_form():
     return {
         "status": "success",
         "form_score": 92,
-        "feedback": ["Good knee tracking", "Depth reached successfully", "Keep chest up slightly more on ascent"]
+        "feedback": ["Good knee tracking", "Depth reached successfully", "Keep chest up slightly more on ascent"],
     }

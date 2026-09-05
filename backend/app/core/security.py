@@ -1,20 +1,34 @@
 from datetime import datetime, timedelta
 from typing import Any
-
+import bcrypt
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 
 SECRET_KEY = "your-secret-key"  # TODO: Change this in production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    # Direct bcrypt verification, bypassing passlib bugs entirely
+    plain_bytes = plain_password.encode('utf-8')
+    if len(plain_bytes) > 72:
+        plain_bytes = plain_bytes[:72]
+    
+    hashed_bytes = hashed_password.encode('utf-8')
+    try:
+        return bcrypt.checkpw(plain_bytes, hashed_bytes)
+    except Exception:
+        return False
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    # Direct bcrypt hashing with 72-byte safety limit
+    pwd_bytes = password.encode('utf-8')
+    if len(pwd_bytes) > 72:
+        pwd_bytes = pwd_bytes[:72]
+    hashed = bcrypt.hashpw(pwd_bytes, bcrypt.gensalt())
+    return hashed.decode('utf-8')
+
+# Alias to match main.py imports cleanly
+hash_password = get_password_hash
 
 def create_access_token(
     subject: str | Any, expires_delta: timedelta | None = None

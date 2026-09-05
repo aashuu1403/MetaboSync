@@ -1,13 +1,29 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+from typing import List, Optional
 
-class UserBase(BaseModel):
+class SignupRequest(BaseModel):
+    full_name: str
     email: str
+    phone: str
 
-class UserCreate(UserBase):
+class VerifyOTPRequest(BaseModel):
+    email: str
+    otp: str
     password: str
 
-class UserResponse(UserBase):
-    id: int
-    is_active: bool
+class LoginRequest(BaseModel):
+    identifier: str
+    password: str
 
-    model_config = ConfigDict(from_attributes=True)
+class WorkoutSetCreate(BaseModel):
+    set_number: int
+    weight_kg: float
+    reps: int
+    notes: Optional[str] = ""
+
+class DetailedWorkoutCreate(BaseModel):
+    email: str
+    split_name: str
+    exercise_name: str
+    duration_minutes: int
+    sets: List[WorkoutSetCreate]
